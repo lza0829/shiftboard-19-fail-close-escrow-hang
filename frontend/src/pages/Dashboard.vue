@@ -30,6 +30,21 @@ onMounted(async () => {
       <p class="msg" :class="{ ok: data.锁托管同源 }">
         {{ data.锁托管同源 ? '进行中数、班次锁与托管集合同源一致' : '警告：锁/托管与进行中交班不同源' }}
       </p>
+      <div class="panel" v-if="data.最近闭环证明">
+        <h2>最近闭环证明 · 交班单 #{{ data.最近闭环证明.handover_id }}（{{ data.最近闭环证明.status }}）</h2>
+        <div class="stats">
+          <div class="stat"><div class="k">锁已释放</div><div class="v">{{ data.最近闭环证明.锁已释放 ? '是' : '否' }}</div></div>
+          <div class="stat"><div class="k">交班方班次态</div><div class="v">{{ data.最近闭环证明.交班方班次态 || '—' }}</div></div>
+          <div class="stat"><div class="k">接班方班次态</div><div class="v">{{ data.最近闭环证明.接班方班次态 || '—' }}</div></div>
+          <div class="stat"><div class="k">托管归位批次</div><div class="v">{{ data.最近闭环证明.托管归位批次数 }}</div></div>
+          <div class="stat"><div class="k">托管已清空</div><div class="v">{{ data.最近闭环证明.托管已清空 ? '是' : '否' }}</div></div>
+          <div class="stat"><div class="k">允许再次完成</div><div class="v">{{ data.最近闭环证明.允许再次完成 ? '是' : '否' }}</div></div>
+        </div>
+        <p class="lead" style="margin:0">
+          关闭时间 {{ data.最近闭环证明.closed_at || '—' }}
+          <template v-if="data.最近闭环证明.closure_reason"> · 关闭原因：{{ data.最近闭环证明.closure_reason }}</template>
+        </p>
+      </div>
       <div class="panel">
         <h2>班次状态</h2>
         <table>

@@ -25,6 +25,12 @@ def get_one(handover_id: int):
     return svc.get_handover(handover_id)
 
 
+@router.get("/{handover_id}/closure")
+def get_closure(handover_id: int):
+    """只读闭环证明：锁态、双方班次态、托管清空结果、是否允许再完成。"""
+    return svc.get_closure_proof(handover_id)
+
+
 @router.post("/start")
 def start(body: StartBody):
     return svc.start_handover(body.from_shift_id, body.to_shift_id)

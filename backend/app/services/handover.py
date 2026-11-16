@@ -165,6 +165,33 @@ def get_handover(handover_id: int) -> dict:
         return out
 
 
+def _closure_proof(h) -> dict:
+    """由交班单关闭快照列构造闭环证明（与在途/托管集合同库同源，直接读交班单）。"""
+    return {
+        "handover_id": h["id"],
+        "status": h["status"],
+        "closed_at": h["closed_at"],
+        "closure_reason": h["closure_reason"],
+        "锁已释放": bool(h["released_lock"]),
+        "交班方班次态": h["from_shift_status_after"] or None,
+        "接班方班次态": h["to_shift_status_after"] or None,
+        "托管归位批次数": h["escrow_returned_count"],
+        "托管已清空": bool(h["escrow_cleared"]),
+        "允许再次完成": bool(h["recomplete_allowed"]),
+    }
+
+
+def get_closure_proof(handover_id: int) -> dict:
+    """按交班单 id 查询持久化闭环证明（只读）：锁态、双方班次态、托管清空结果、是否允许再完成。"""
+    with connect() as conn:
+        h = conn.execute(
+            "SELECT * FROM handovers WHERE id = ?", (handover_id,)
+        ).fetchone()
+        if not h:
+            raise HTTPException(404, "交班单不存在")
+        return _closure_proof(h)
+
+
 def dashboard() -> dict:
     with connect() as conn:
         shifts = rows_to_dicts(conn.execute("SELECT * FROM shifts ORDER BY id").fetchall())
@@ -189,6 +216,15 @@ def dashboard() -> dict:
         last = conn.execute(
             "SELECT * FROM handovers ORDER BY id DESC LIMIT 1"
         ).fetchone()
+        # 最近一单已关闭交班的闭环证明，与上方在途/托管/锁统计同库同源
+        last_closed = conn.execute(
+            """
+            SELECT * FROM handovers
+            WHERE status != ? AND closed_at IS NOT NULL
+            ORDER BY id DESC LIMIT 1
+            """,
+            (HANDOVER_ACTIVE,),
+        ).fetchone()
         # 同源校验：有进行中单则必有托管批次且双方班次被锁；无进行中单则三处皆空
         if active > 0:
             same_source = (
@@ -206,6 +242,7 @@ def dashboard() -> dict:
             "锁定班次数": locked_shifts,
             "锁托管同源": bool(same_source),
             "最近交班": dict(last) if last else None,
+            "最近闭环证明": _closure_proof(last_closed) if last_closed else None,
             "班次": shifts,
         }
 
@@ -307,26 +344,80 @@ def _fail_close(conn, h: dict, reason: str) -> int:
     以不可变清单（handover_items）为权威归位集合，覆盖三种情形：
     批次仍在托管、托管行异常丢失、批次已被部分过户。无论当前归属/状态如何，
     都强制拉回交班方在途，杜绝“只改失败却留下托管悬空/孤儿托管批/归属错乱”。
+    闭环证明（锁态、双方班次态、托管清空结果、禁止再完成）同事务固化到关闭快照列。
     """
     hid = h["id"]
     item_rows = conn.execute(
         "SELECT batch_id FROM handover_items WHERE handover_id = ? ORDER BY batch_id",
         (hid,),
     ).fetchall()
-    returned = 0
     pre = _latest_event_payload(conn, hid, "交班发起")
     from_pre = pre.get("交班前交班方状态", SHIFT_ON_DUTY)
     to_pre = pre.get("交班前接班方状态", SHIFT_IDLE)
 
+    # 1) 清单整批归位：权威集合是不可变清单而非残留托管行，强制拉回交班方在途
+    returned = 0
+    for r in item_rows:
+        cur = conn.execute(
+            "UPDATE batches SET owner_shift_id = ?, status = ? WHERE id = ?",
+            (h["from_shift_id"], BATCH_INFLIGHT, r["batch_id"]),
+        )
+        returned += cur.rowcount
+
+    # 2) 清托管：本单托管行全部删除，杜绝托管悬空
+    conn.execute("DELETE FROM handover_escrow WHERE handover_id = ?", (hid,))
+    escrow_left = conn.execute(
+        "SELECT COUNT(*) AS c FROM handover_escrow WHERE handover_id = ?",
+        (hid,),
+    ).fetchone()["c"]
+    escrow_cleared = 1 if escrow_left == 0 else 0
+
+    # 3) 释放进行中锁：双方班次恢复到发起前状态
+    conn.execute(
+        "UPDATE shifts SET status = ? WHERE id = ?",
+        (from_pre, h["from_shift_id"]),
+    )
+    conn.execute(
+        "UPDATE shifts SET status = ? WHERE id = ?",
+        (to_pre, h["to_shift_id"]),
+    )
+    # 回读实际落库状态作为闭环证明，而不是只记意图
+    from_after = conn.execute(
+        "SELECT status FROM shifts WHERE id = ?", (h["from_shift_id"],)
+    ).fetchone()["status"]
+    to_after = conn.execute(
+        "SELECT status FROM shifts WHERE id = ?", (h["to_shift_id"],)
+    ).fetchone()["status"]
+    still_locked = conn.execute(
+        "SELECT COUNT(*) AS c FROM shifts WHERE id IN (?, ?) AND status IN (?, ?)",
+        (h["from_shift_id"], h["to_shift_id"], SHIFT_HANDING_OVER, SHIFT_TAKING_OVER),
+    ).fetchone()["c"]
+    released = 1 if still_locked == 0 else 0
+
+    # 4) 固化关闭快照列（形态二）：锁释放、托管归位、双方班次态、禁止再完成
     now = _now()
     conn.execute(
         """
         UPDATE handovers
         SET status = ?, reason = ?, finished_at = ?, closed_at = ?,
-            closure_reason = ?, released_lock = 0, escrow_returned_count = ?
+            closure_reason = ?, released_lock = ?, escrow_returned_count = ?,
+            from_shift_status_after = ?, to_shift_status_after = ?,
+            escrow_cleared = ?, recomplete_allowed = 0
         WHERE id = ?
         """,
-        (HANDOVER_FAILED, reason, now, now, reason, returned, hid),
+        (
+            HANDOVER_FAILED,
+            reason,
+            now,
+            now,
+            reason,
+            released,
+            returned,
+            from_after,
+            to_after,
+            escrow_cleared,
+            hid,
+        ),
     )
     _append_event(
         conn,
@@ -334,10 +425,12 @@ def _fail_close(conn, h: dict, reason: str) -> int:
         "交班失败关闭",
         {
             "原因": reason,
-            "锁释放": False,
+            "锁释放": bool(released),
             "托管归位批次数": returned,
-            "交班方恢复状态": from_pre,
-            "接班方恢复状态": to_pre,
+            "托管清空": bool(escrow_cleared),
+            "交班方恢复状态": from_after,
+            "接班方恢复状态": to_after,
+            "允许再次完成": False,
         },
     )
     return returned
@@ -414,7 +507,7 @@ def complete_handover(handover_id: int) -> dict:
                     }
                 )
             else:
-                # 成功路径清托管、放锁、班次到位
+                # 成功路径清托管、放锁、班次到位，并同样固化闭环证明（禁止再完成）
                 conn.execute(
                     "DELETE FROM handover_escrow WHERE handover_id = ?", (handover_id,)
                 )
@@ -422,10 +515,20 @@ def complete_handover(handover_id: int) -> dict:
                     """
                     UPDATE handovers
                     SET status = ?, finished_at = ?, closed_at = ?, released_lock = 1,
-                        escrow_returned_count = 0, batch_count = ?
+                        escrow_returned_count = 0, batch_count = ?,
+                        from_shift_status_after = ?, to_shift_status_after = ?,
+                        escrow_cleared = 1, recomplete_allowed = 0
                     WHERE id = ?
                     """,
-                    (HANDOVER_DONE, _now(), _now(), before, handover_id),
+                    (
+                        HANDOVER_DONE,
+                        _now(),
+                        _now(),
+                        before,
+                        SHIFT_HANDED_OVER,
+                        SHIFT_ON_DUTY,
+                        handover_id,
+                    ),
                 )
                 conn.execute(
                     "UPDATE shifts SET status = ? WHERE id = ?",
@@ -439,7 +542,14 @@ def complete_handover(handover_id: int) -> dict:
                     conn,
                     handover_id,
                     "交班完成",
-                    {"过户批次数": transferred, "锁释放": True, "托管清空": True},
+                    {
+                        "过户批次数": transferred,
+                        "锁释放": True,
+                        "托管清空": True,
+                        "交班方班次态": SHIFT_HANDED_OVER,
+                        "接班方班次态": SHIFT_ON_DUTY,
+                        "允许再次完成": False,
+                    },
                 )
                 detail.update(
                     {

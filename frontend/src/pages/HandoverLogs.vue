@@ -5,16 +5,23 @@ import { getJson } from '../api'
 const rows = ref([])
 const expanded = ref(null)
 const detail = ref(null)
+const closure = ref(null)
 const err = ref('')
 
 async function toggle(h) {
   if (expanded.value === h.id) {
     expanded.value = null
     detail.value = null
+    closure.value = null
     return
   }
   expanded.value = h.id
-  detail.value = await getJson(`/api/handovers/${h.id}`)
+  const [d, c] = await Promise.all([
+    getJson(`/api/handovers/${h.id}`),
+    getJson(`/api/handovers/${h.id}/closure`),
+  ])
+  detail.value = d
+  closure.value = c
 }
 
 onMounted(async () => {
@@ -59,6 +66,17 @@ onMounted(async () => {
     <div class="panel" v-if="detail && expanded !== null">
       <h2>交班单 #{{ expanded }} 明细</h2>
       <p v-if="detail.closure_reason" class="msg">关闭原因：{{ detail.closure_reason }}</p>
+      <template v-if="closure">
+        <h3 style="margin:12px 0 6px">闭环证明（只读，与在途/托管集合同源）</h3>
+        <div class="stats">
+          <div class="stat"><div class="k">锁已释放</div><div class="v">{{ closure.锁已释放 ? '是' : '否' }}</div></div>
+          <div class="stat"><div class="k">交班方班次态</div><div class="v">{{ closure.交班方班次态 || '—' }}</div></div>
+          <div class="stat"><div class="k">接班方班次态</div><div class="v">{{ closure.接班方班次态 || '—' }}</div></div>
+          <div class="stat"><div class="k">托管归位批次</div><div class="v">{{ closure.托管归位批次数 }}</div></div>
+          <div class="stat"><div class="k">托管已清空</div><div class="v">{{ closure.托管已清空 ? '是' : '否' }}</div></div>
+          <div class="stat"><div class="k">允许再次完成</div><div class="v">{{ closure.允许再次完成 ? '是' : '否' }}</div></div>
+        </div>
+      </template>
       <h3 style="margin:12px 0 6px">清单快照（独立清单表，不可复用）</h3>
       <table>
         <thead><tr><th>业务键快照</th><th>标题</th><th>当前状态</th></tr></thead>

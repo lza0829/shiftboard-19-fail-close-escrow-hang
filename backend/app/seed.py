@@ -34,7 +34,12 @@ CREATE TABLE IF NOT EXISTS handovers (
   closed_at TEXT,
   closure_reason TEXT NOT NULL DEFAULT '',
   released_lock INTEGER NOT NULL DEFAULT 0,
-  escrow_returned_count INTEGER NOT NULL DEFAULT 0
+  escrow_returned_count INTEGER NOT NULL DEFAULT 0,
+  -- 失败闭环证明：双方班次落库态、托管清空结果、是否允许再完成（关闭即置 0）
+  from_shift_status_after TEXT NOT NULL DEFAULT '',
+  to_shift_status_after TEXT NOT NULL DEFAULT '',
+  escrow_cleared INTEGER NOT NULL DEFAULT 0,
+  recomplete_allowed INTEGER NOT NULL DEFAULT 1
 );
 -- 独立清单表：每单（含失败后重开的新单）挂各自交班单 id 的不可变快照，
 -- 新发起按发起时刻重快照，禁止复用失败单旧清单。
@@ -121,10 +126,17 @@ def _ensure_columns(conn) -> None:
         "closure_reason": "TEXT NOT NULL DEFAULT ''",
         "released_lock": "INTEGER NOT NULL DEFAULT 0",
         "escrow_returned_count": "INTEGER NOT NULL DEFAULT 0",
+        "from_shift_status_after": "TEXT NOT NULL DEFAULT ''",
+        "to_shift_status_after": "TEXT NOT NULL DEFAULT ''",
+        "escrow_cleared": "INTEGER NOT NULL DEFAULT 0",
+        "recomplete_allowed": "INTEGER NOT NULL DEFAULT 1",
     }
     for name, decl in extra.items():
         if name not in existing:
             conn.execute(f"ALTER TABLE handovers ADD COLUMN {name} {decl}")
+    # 老库回填：已关闭（失败/已完成）的单一律禁止再完成；已完成单托管必然已清
+    conn.execute("UPDATE handovers SET recomplete_allowed = 0 WHERE status != '进行中'")
+    conn.execute("UPDATE handovers SET escrow_cleared = 1 WHERE status = '已完成'")
     item_cols = {r["name"] for r in conn.execute("PRAGMA table_info(handover_items)").fetchall()}
     if "biz_key" not in item_cols:
         conn.execute("ALTER TABLE handover_items ADD COLUMN biz_key TEXT NOT NULL DEFAULT ''")

@@ -51,7 +51,7 @@ async function complete() {
     ok.value = current.value.status === '已完成'
     msg.value = current.value.status === '已完成'
       ? `交班单 #${current.value.id} 已完成，托管批次已整批过户`
-      : `交班单 #${current.value.id} 失败关闭：${current.value.reason || '归属不一致'}`
+      : `交班单 #${current.value.id} 失败关闭：${current.value.reason || '归属不一致'}；锁${current.value.released_lock ? '已释放' : '未释放'}，托管归位 ${current.value.escrow_returned_count} 批，双方班次已恢复，该单禁止再完成`
     await refresh()
   } catch (e) {
     msg.value = String(e.message || e)
@@ -67,7 +67,7 @@ async function failClose() {
     if (reason === null) return
     current.value = await postJson(`/api/handovers/${current.value.id}/fail`, { reason })
     ok.value = false
-    msg.value = `交班单 #${current.value.id} 已标失败`
+    msg.value = `交班单 #${current.value.id} 已失败关闭：锁${current.value.released_lock ? '已释放' : '未释放'}，托管归位 ${current.value.escrow_returned_count} 批回交班方在途，双方班次已恢复，该单禁止再完成`
     await refresh()
   } catch (e) {
     msg.value = String(e.message || e)
