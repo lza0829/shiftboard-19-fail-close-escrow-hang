@@ -1,0 +1,13 @@
+node_modules/
+__pycache__/
+.pytest_cache/
+backend/data/
+backend/data_test/
+backend/data_test_fail/
+dist/
+.venv/
+*.pyc
+
+backend/_u.err
+backend/_u.out
+frontend/_vite.log
